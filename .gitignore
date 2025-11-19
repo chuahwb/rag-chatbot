@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.python-version
+.mypy_cache/
+.pytest_cache/
+
+# Environment
+.venv/
+.env
+.env.*
+
+# OS
+.DS_Store
+
+# Data artifacts
+data/
+*.db
+*.sqlite
+
+# Node / frontend
+node_modules/
+dist/
+.parcel-cache/
+
+# Local test and coverage outputs
+test-results/
+web/test-results/
+web/playwright-report/
+.coverage
+htmlcov/
+coverage/
+
+# Non-code docs that should not be committed on future changes
+/docs/
+/task.md

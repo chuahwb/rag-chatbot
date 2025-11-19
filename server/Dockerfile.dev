@@ -1,0 +1,30 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app/server \
+    WATCHFILES_FORCE_POLLING=true
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements/dev.txt /tmp/requirements.txt
+
+RUN pip install --upgrade pip && pip install -r /tmp/requirements.txt
+
+# Copying the server directory allows the container to run standalone in CI,
+# while docker-compose uses a bind mount for rapid dev iteration.
+COPY . /app/server
+
+WORKDIR /app/server
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "app", "--reload-dir", "scripts"]
+

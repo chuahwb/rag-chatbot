@@ -1,0 +1,46 @@
+services:
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.dev
+    env_file:
+      - ./.env
+    environment:
+      PYTHONPATH: /app/server
+      WATCHFILES_FORCE_POLLING: "true"
+    volumes:
+      - ./server:/app/server:delegated
+      - ./data:/app/data:delegated
+      - ./.env:/app/server/.env:ro
+    ports:
+      - "8000:8000"
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile.dev
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+      VITE_ENABLE_SSE: "true"
+      VITE_PORT: "5173"
+    volumes:
+      - ./web:/app:delegated
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+
+  # Uncomment the calculator service to exercise CALC_TOOL_MODE=http locally.
+  # calc:
+  #   # Example placeholder if you wire up the standalone HTTP calculator tool.
+  #   # Replace the image/command below with your calculator service implementation.
+  #   image: python:3.11-slim
+  #   command: python -m http.server 9000
+  #   ports:
+  #     - "9000:9000"
+
+networks:
+  default:
+    name: rag-chatbot-dev
+

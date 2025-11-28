@@ -1,6 +1,6 @@
 import type { ChatMessage, ToolAction } from '../api/types'
 
-type TurnActionMap = Record<string, ToolAction[]>
+export type TurnActionMap = Record<string, ToolAction[]>
 
 export interface PersistedChatState {
   sessionId: string
@@ -45,12 +45,30 @@ function normalizeState(state: unknown): PersistedChatState | null {
   return {
     sessionId: parsed.sessionId,
     messages: Array.isArray(parsed.messages) ? parsed.messages : [],
-    actionsByTurn:
-      typeof parsed.actionsByTurn === 'object' && parsed.actionsByTurn !== null
-        ? parsed.actionsByTurn
-        : {},
+    actionsByTurn: normalizeActions(parsed.actionsByTurn),
     updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : Date.now()
   }
+}
+
+function normalizeActions(map: unknown): TurnActionMap {
+  if (!map || typeof map !== 'object') {
+    return {}
+  }
+
+  const entries = Object.entries(map as Record<string, unknown>)
+  const normalized: TurnActionMap = {}
+  for (const [key, value] of entries) {
+    if (!Array.isArray(value)) {
+      continue
+    }
+    const actions = value.filter((item): item is ToolAction => {
+      return typeof item === 'object' && item !== null && 'type' in (item as Record<string, unknown>)
+    })
+    if (actions.length > 0) {
+      normalized[key] = actions
+    }
+  }
+  return normalized
 }
 
 export function loadSessionState(): PersistedChatState | null {

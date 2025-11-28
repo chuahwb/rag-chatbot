@@ -7,10 +7,11 @@ export interface ChatMessage {
 
 export type ToolActionType = 'decision' | 'tool_call' | 'tool_result'
 export type ToolStatus = 'success' | 'error'
+export type ToolName = 'calc' | 'products' | 'outlets'
 
 export interface ToolAction {
   type: ToolActionType
-  tool?: 'calc' | 'products' | 'outlets'
+  tool?: ToolName | null
   args?: Record<string, unknown> | null
   status?: ToolStatus | null
   data?: unknown

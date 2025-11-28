@@ -10,10 +10,13 @@ import {
   postChat,
   resetSession
 } from '../api/client'
+import type { ChatMessage } from '../api/types'
 import {
   bootstrapSessionState,
   clearSessionState,
   loadSessionState,
+  type PersistedChatState,
+  type TurnActionMap,
   updateSessionMessages
 } from '../state/storage'
 import { useChat } from './useChat'
@@ -39,11 +42,8 @@ vi.mock('../state/storage', () => ({
 
 const makeState = (
   sessionId: string,
-  overrides: Partial<{
-    messages: { role: 'user' | 'assistant' | 'tool'; content: string }[]
-    actionsByTurn: Record<string, unknown>
-  }> = {}
-) => ({
+  overrides: Partial<{ messages: ChatMessage[]; actionsByTurn: TurnActionMap }> = {}
+): PersistedChatState => ({
   sessionId,
   messages: overrides.messages ?? [],
   actionsByTurn: overrides.actionsByTurn ?? {},

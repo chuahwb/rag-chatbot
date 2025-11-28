@@ -180,7 +180,7 @@ The repo now ships with a Render blueprint (`render.yaml`) plus production Docke
      - `OPENAI_API_KEY`, `TEXT2SQL_PROVIDER=openai` (or `fake/local` if preferred).
      - `PRODUCT_VECTOR_STORE_BACKEND=pinecone` plus `PINECONE_API_KEY`, `PINECONE_INDEX_NAME`, `PINECONE_REGION`, `PINECONE_CLOUD`.
      - `ENABLE_SSE=true` if you want planner telemetry.
-     - `RENDER_FRONTEND_ORIGIN=https://<your-frontend>.onrender.com` so CORS automatically whitelists the hosted UI.
+     - `RENDER_FRONTEND_ORIGIN=https://rag-chatbot-web.onrender.com` so CORS automatically whitelists the hosted UI.
    - Optional: Langfuse keys, calculator HTTP mode, etc., via the same env mechanism.
 
 3. **Frontend static site (Vite)**

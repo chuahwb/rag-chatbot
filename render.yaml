@@ -35,8 +35,8 @@ services:
       - key: RENDER_FRONTEND_ORIGIN
         value: https://rag-chatbot-web.onrender.com
 
-staticSites:
-  - name: rag-chatbot-web
+  - type: static_site
+    name: rag-chatbot-web
     rootDir: web
     buildCommand: npm install && npm run build
     publishPath: dist

@@ -35,11 +35,12 @@ services:
       - key: RENDER_FRONTEND_ORIGIN
         value: https://rag-chatbot-web.onrender.com
 
-  - type: static_site
+  - type: web
     name: rag-chatbot-web
+    env: static
     rootDir: web
     buildCommand: npm install && npm run build
-    publishPath: dist
+    staticPublishPath: dist
     envVars:
       - key: VITE_API_BASE_URL
         value: https://rag-chatbot-api.onrender.com

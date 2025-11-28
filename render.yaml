@@ -1,0 +1,51 @@
+services:
+  - type: web
+    name: rag-chatbot-api
+    env: docker
+    plan: starter
+    rootDir: server
+    dockerfilePath: Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: OUTLETS_DB_BACKEND
+        value: postgres
+      - key: OUTLETS_POSTGRES_URL
+        fromDatabase:
+          name: rag-chatbot-outlets
+          property: connectionString
+      - key: PRODUCT_VECTOR_STORE_BACKEND
+        value: pinecone
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: PINECONE_INDEX_NAME
+        value: zus-products
+      - key: PINECONE_CLOUD
+        value: aws
+      - key: PINECONE_REGION
+        value: us-east-1
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: TEXT2SQL_PROVIDER
+        value: openai
+      - key: ENABLE_SSE
+        value: "true"
+      - key: RENDER_FRONTEND_ORIGIN
+        value: https://rag-chatbot-web.onrender.com
+  - type: static
+    name: rag-chatbot-web
+    rootDir: web
+    buildCommand: npm install && npm run build
+    publishPath: dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        value: https://rag-chatbot-api.onrender.com
+      - key: VITE_ENABLE_SSE
+        value: "true"
+
+databases:
+  - name: rag-chatbot-outlets
+    plan: starter
+

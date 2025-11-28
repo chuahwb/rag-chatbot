@@ -1,3 +1,6 @@
+import sys
+import types
+
 import pytest
 from langchain_core.documents import Document
 
@@ -134,6 +137,155 @@ def test_from_settings_runtime_error_wrapped(monkeypatch, tmp_path):
     with pytest.raises(ProductSearchError) as excinfo:
         ProductSearchService.from_settings()
     assert "Product vector store is not available." in str(excinfo.value)
+
+
+def test_from_settings_uses_pinecone_when_configured(monkeypatch):
+    settings = AppSettings(
+        product_vector_store_backend="pinecone",
+        pinecone_api_key="pc-key",
+        pinecone_index_name="zus-products",
+        openai_api_key="openai-key",
+    )
+    monkeypatch.setattr("app.services.products.get_settings", lambda: settings)
+
+    class DummyEmbeddings:
+        pass
+
+    monkeypatch.setattr("langchain_openai.OpenAIEmbeddings", lambda *args, **kwargs: DummyEmbeddings())
+
+    class DummyListResponse:
+        def names(self):
+            return ["zus-products"]
+
+    class DummyPineconeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+            self.index = object()
+            self.last_index = None
+
+        def list_indexes(self):
+            return DummyListResponse()
+
+        def Index(self, name):
+            self.last_index = name
+            return self.index
+
+    clients: list[DummyPineconeClient] = []
+
+    def fake_pinecone(api_key):
+        client = DummyPineconeClient(api_key)
+        clients.append(client)
+        return client
+
+    fake_pinecone_module = types.SimpleNamespace(Pinecone=fake_pinecone)
+    monkeypatch.setitem(sys.modules, "pinecone", fake_pinecone_module)
+
+    class DummyVectorStore:
+        def __init__(self, index, embedding):
+            self.index = index
+            self.embedding = embedding
+
+        def similarity_search_with_relevance_scores(self, query: str, k: int):
+            return []
+
+    fake_langchain_pinecone = types.SimpleNamespace(PineconeVectorStore=DummyVectorStore)
+    monkeypatch.setitem(sys.modules, "langchain_pinecone", fake_langchain_pinecone)
+
+    service = ProductSearchService.from_settings()
+
+    assert isinstance(service._vector_store, DummyVectorStore)
+    assert clients[0].last_index == settings.pinecone_index_name
+
+
+def test_from_settings_pinecone_missing_index(monkeypatch):
+    settings = AppSettings(
+        product_vector_store_backend="pinecone",
+        pinecone_api_key="pc-key",
+        pinecone_index_name="missing-index",
+        openai_api_key="openai-key",
+    )
+    monkeypatch.setattr("app.services.products.get_settings", lambda: settings)
+
+    class DummyEmbeddings:
+        pass
+
+    monkeypatch.setattr("langchain_openai.OpenAIEmbeddings", lambda *args, **kwargs: DummyEmbeddings())
+
+    class DummyListResponse:
+        def names(self):
+            return []
+
+    class DummyPineconeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def list_indexes(self):
+            return DummyListResponse()
+
+    def fake_pinecone(api_key):
+        return DummyPineconeClient(api_key)
+
+    fake_pinecone_module = types.SimpleNamespace(Pinecone=fake_pinecone)
+    monkeypatch.setitem(sys.modules, "pinecone", fake_pinecone_module)
+
+    class DummyVectorStore:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Should not instantiate vector store when index is missing")
+
+    fake_langchain_pinecone = types.SimpleNamespace(PineconeVectorStore=DummyVectorStore)
+    monkeypatch.setitem(sys.modules, "langchain_pinecone", fake_langchain_pinecone)
+
+    with pytest.raises(ProductSearchError) as excinfo:
+        ProductSearchService.from_settings()
+    assert "Product vector store is not available." in str(excinfo.value)
+
+
+def test_from_settings_pinecone_missing_api_key(monkeypatch):
+    settings = AppSettings(
+        product_vector_store_backend="pinecone",
+        pinecone_api_key=None,
+        pinecone_index_name="zus-products",
+        openai_api_key="openai-key",
+    )
+    monkeypatch.setattr("app.services.products.get_settings", lambda: settings)
+
+    class DummyEmbeddings:
+        pass
+
+    monkeypatch.setattr("langchain_openai.OpenAIEmbeddings", lambda *args, **kwargs: DummyEmbeddings())
+
+    fake_pinecone_module = types.SimpleNamespace(Pinecone=lambda api_key: None)
+    fake_langchain_pinecone = types.SimpleNamespace(PineconeVectorStore=lambda *args, **kwargs: None)
+    monkeypatch.setitem(sys.modules, "pinecone", fake_pinecone_module)
+    monkeypatch.setitem(sys.modules, "langchain_pinecone", fake_langchain_pinecone)
+
+    with pytest.raises(ProductSearchError) as excinfo:
+        ProductSearchService.from_settings()
+    assert "PINECONE_API_KEY" in str(excinfo.value)
+
+
+def test_from_settings_pinecone_missing_index_name(monkeypatch):
+    settings = AppSettings(
+        product_vector_store_backend="pinecone",
+        pinecone_api_key="pc-key",
+        pinecone_index_name=None,
+        openai_api_key="openai-key",
+    )
+    monkeypatch.setattr("app.services.products.get_settings", lambda: settings)
+
+    class DummyEmbeddings:
+        pass
+
+    monkeypatch.setattr("langchain_openai.OpenAIEmbeddings", lambda *args, **kwargs: DummyEmbeddings())
+
+    fake_pinecone_module = types.SimpleNamespace(Pinecone=lambda api_key: None)
+    fake_langchain_pinecone = types.SimpleNamespace(PineconeVectorStore=lambda *args, **kwargs: None)
+    monkeypatch.setitem(sys.modules, "pinecone", fake_pinecone_module)
+    monkeypatch.setitem(sys.modules, "langchain_pinecone", fake_langchain_pinecone)
+
+    with pytest.raises(ProductSearchError) as excinfo:
+        ProductSearchService.from_settings()
+    assert "PINECONE_INDEX_NAME" in str(excinfo.value)
 
 
 def test_search_includes_summary_when_summary_fn_provided():

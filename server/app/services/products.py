@@ -6,11 +6,13 @@ from textwrap import dedent
 from typing import Awaitable, Callable, Protocol, Sequence
 
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 
 from app.core.config import AppSettings, get_settings
 from app.core.langfuse import get_langchain_callbacks
 from app.core.exceptions import AppError
 from app.models.products import ProductHit, ProductSearchResponse
+from app.services.pinecone_utils import extract_index_names
 
 
 class ProductSearchError(AppError):
@@ -28,6 +30,31 @@ class ProductVectorStore(Protocol):
 SummaryFn = Callable[[str, Sequence[Document]], Awaitable[str] | str]
 
 
+def build_product_embeddings(
+    settings: AppSettings, provider_override: str | None = None
+) -> Embeddings:
+    """
+    Returns the embeddings implementation configured for product RAG.
+    """
+    from langchain_community.embeddings.fake import FakeEmbeddings
+    from langchain_openai import OpenAIEmbeddings
+
+    provider = (provider_override or settings.embeddings_provider or "openai").lower()
+
+    if provider == "openai":
+        if not settings.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is not configured for product embeddings.")
+        # text-embedding-3-small outputs 1536-d vectors; Pinecone index must match.
+        return OpenAIEmbeddings(
+            model="text-embedding-3-small",
+            api_key=settings.openai_api_key,
+        )
+    if provider in {"fake", "local"}:
+        return FakeEmbeddings(size=1536)
+
+    raise ValueError(f"Unsupported embeddings provider: {provider}")
+
+
 class ProductSearchService:
     def __init__(
         self,
@@ -41,34 +68,26 @@ class ProductSearchService:
 
     @classmethod
     def from_settings(cls, summary_fn: SummaryFn | None = None) -> "ProductSearchService":
-        from langchain_community.embeddings.fake import FakeEmbeddings
-        from langchain_community.vectorstores import FAISS
-        from langchain_openai import OpenAIEmbeddings
-
         settings = get_settings()
 
-        provider = (settings.embeddings_provider or "openai").lower()
-
-        if provider == "openai":
-            if not settings.openai_api_key:
-                raise ProductSearchError("OPENAI_API_KEY is not configured for product search.")
-            embeddings = OpenAIEmbeddings(
-                model="text-embedding-3-small",
-                api_key=settings.openai_api_key,
-            )
-        elif provider in {"fake", "local"}:
-            embeddings = FakeEmbeddings(size=1536)
-        else:
-            raise ProductSearchError(f"Unsupported embeddings provider: {provider}")
-
         try:
-            vector_store = FAISS.load_local(
-                settings.vector_store_path,
-                embeddings,
-                allow_dangerous_deserialization=True,
-            )
-        except (FileNotFoundError, RuntimeError, OSError) as exc:  # pragma: no cover - depends on runtime env
-            raise ProductSearchError("Product vector store is not available.") from exc
+            embeddings = build_product_embeddings(settings)
+        except ValueError as exc:
+            raise ProductSearchError(str(exc)) from exc
+
+        backend = (settings.product_vector_store_backend or "faiss").lower()
+
+        if backend == "faiss":
+            try:
+                vector_store = _load_faiss_vector_store(settings, embeddings)
+            except ProductSearchError:
+                raise
+            except Exception as exc:
+                raise ProductSearchError("Product vector store is not available.") from exc
+        elif backend == "pinecone":
+            vector_store = _load_pinecone_vector_store(settings, embeddings)
+        else:
+            raise ProductSearchError(f"Unsupported product vector store backend: {backend}")
 
         summary_callable = summary_fn if summary_fn is not None else cls._create_summary_fn(settings)
 
@@ -230,6 +249,49 @@ class ProductSearchService:
         semantic specificity checks). Currently returns results unchanged.
         """
         return results
+
+
+def _load_faiss_vector_store(settings: AppSettings, embeddings: Embeddings) -> ProductVectorStore:
+    from langchain_community.vectorstores import FAISS
+
+    try:
+        return FAISS.load_local(
+            settings.vector_store_path,
+            embeddings,
+            allow_dangerous_deserialization=True,
+        )
+    except (FileNotFoundError, RuntimeError, OSError) as exc:  # pragma: no cover - depends on runtime env
+        raise ProductSearchError("Product vector store is not available.") from exc
+
+
+def _load_pinecone_vector_store(settings: AppSettings, embeddings: Embeddings) -> ProductVectorStore:
+    from langchain_pinecone import PineconeVectorStore
+    from pinecone import Pinecone
+
+    api_key = (settings.pinecone_api_key or "").strip()
+    if not api_key:
+        raise ProductSearchError("PINECONE_API_KEY is required when PRODUCT_VECTOR_STORE_BACKEND=pinecone.")
+    index_name = (settings.pinecone_index_name or "").strip()
+    if not index_name:
+        raise ProductSearchError("PINECONE_INDEX_NAME is required when PRODUCT_VECTOR_STORE_BACKEND=pinecone.")
+
+    client = Pinecone(api_key=api_key)
+    try:  # pragma: no cover - network errors depend on runtime env
+        if not _pinecone_index_exists(client, index_name):
+            raise ProductSearchError("Product vector store is not available.")
+    except ProductSearchError:
+        raise
+    except Exception as exc:
+        raise ProductSearchError("Failed to connect to Pinecone.") from exc
+
+    index = client.Index(index_name)
+    return PineconeVectorStore(index=index, embedding=embeddings)
+
+
+def _pinecone_index_exists(client, index_name: str) -> bool:
+    response = client.list_indexes()
+    names = extract_index_names(response)
+    return index_name in names
 
 
 def _coerce_float(value: object) -> float | None:

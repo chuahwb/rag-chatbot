@@ -16,10 +16,21 @@ def _get_engine():
     global _engine
     if _engine is None:
         settings = get_settings()
-        _engine = create_engine(
-            settings.sqlite_url,
-            connect_args={"check_same_thread": False} if settings.sqlite_url.startswith("sqlite") else {},
-        )
+        backend = (settings.outlets_db_backend or "sqlite").strip().lower()
+        if backend == "postgres":
+            db_url = (settings.outlets_postgres_url or "").strip()
+            if not db_url:
+                raise ValueError("OUTLETS_POSTGRES_URL must be configured when OUTLETS_DB_BACKEND=postgres.")
+        elif backend == "sqlite":
+            db_url = (settings.outlets_sqlite_url or "").strip()
+            if not db_url:
+                raise ValueError("OUTLETS_SQLITE_URL / SQLITE_URL must be configured when OUTLETS_DB_BACKEND=sqlite.")
+        else:
+            raise ValueError(f"Unsupported OUTLETS_DB_BACKEND: {settings.outlets_db_backend}")
+        kwargs: dict[str, object] = {}
+        if db_url.startswith("sqlite"):
+            kwargs["connect_args"] = {"check_same_thread": False}
+        _engine = create_engine(db_url, **kwargs)
     return _engine
 
 

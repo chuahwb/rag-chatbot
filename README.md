@@ -24,7 +24,7 @@ End-to-end RAG chatbot for the Mindhive assessment. A FastAPI backend with a Lan
    ```
    - API: `http://localhost:8000`
    - Web UI: `http://localhost:5173`
-   - Data: FAISS and SQLite persisted under `./data/`
+   - Data: FAISS (default) and SQLite persisted under `./data/` (Pinecone lives in the managed service)
 3. Stop with `Ctrl+C`.
 
 ### Option 2: Native Development (separate processes)
@@ -38,7 +38,7 @@ End-to-end RAG chatbot for the Mindhive assessment. A FastAPI backend with a Lan
    ```
 2. (Optional) ingest real data:
    ```bash
-   make ingest  # builds FAISS index under ./data/faiss/products
+   make ingest  # builds FAISS index locally (or pushes to Pinecone when configured)
    make seed    # seeds SQLite outlets DB under ./data/sqlite/outlets.db
    ```
 3. Run the API:
@@ -75,7 +75,7 @@ Starts FastAPI and Vite together (Python 3.11+ and Node 20+ recommended).
   - `app/agents/planner.py`:
     - LangGraph state machine for classifying intent, extracting slots, choosing tools vs follow-ups vs answering.
   - `app/services/products.py`:
-    - RAG over FAISS index (`data/faiss/products`), with optional LLM summarization.
+    - RAG over FAISS (`data/faiss/products`) or Pinecone, with optional LLM summarization.
   - `app/services/outlets.py`:
     - Text2SQL pipeline over SQLite (`data/sqlite/outlets.db`), with strong SQL safety checks.
   - `app/services/calculator.py` / `app/services/calculator_http.py`:
@@ -111,7 +111,7 @@ Planner and tool activity are streamed back to the UI over SSE and presented alo
   - `CALC_TOOL_MODE=http` allows swapping in an external calculator microservice at `CALC_HTTP_BASE_URL`.
 
 - **RAG vs Text2SQL separation**
-  - Products are retrieved via embeddings + FAISS (vector similarity) and optional LLM summaries.
+  - Products are retrieved via embeddings + FAISS/Pinecone (configurable) and optional LLM summaries.
   - Outlets are stored in SQLite and queried via an NL→SQL chain with strict safety filters.
   - This separation mirrors common production patterns: unstructured product copy vs highly structured outlet data.
 
@@ -133,11 +133,14 @@ Backend configuration is driven by the root `.env` (see `env.example` for a docu
 - **Calculator**
   - `CALC_TOOL_MODE`, `CALC_HTTP_BASE_URL`, `CALC_HTTP_TIMEOUT_SEC`
 - **Products RAG**
-  - `EMBEDDINGS_PROVIDER`, `VECTOR_STORE_PATH`
+  - `EMBEDDINGS_PROVIDER`, `PRODUCT_VECTOR_STORE_BACKEND`
+  - `VECTOR_STORE_PATH` (FAISS) or `PINECONE_*` vars (Pinecone)
   - `PRODUCT_SUMMARY_PROVIDER`, `PRODUCT_SUMMARY_MODEL`, `PRODUCT_SUMMARY_TIMEOUT_SEC`
 - **Outlets Text2SQL**
   - `TEXT2SQL_PROVIDER`, `TEXT2SQL_MODEL`, `TEXT2SQL_TIMEOUT_SEC`
-  - `SQLITE_URL` pointing at the outlets DB
+  - `OUTLETS_DB_BACKEND` (sqlite | postgres)
+  - `OUTLETS_SQLITE_URL` (falls back to legacy `SQLITE_URL` when unset)
+  - `OUTLETS_POSTGRES_URL` (used when `OUTLETS_DB_BACKEND=postgres`)
   - `OLLAMA_HOST` when using `TEXT2SQL_PROVIDER=local`
 - **Runtime behavior & observability**
   - `ENABLE_SSE`, `CORS_ORIGINS`
@@ -161,4 +164,33 @@ PRODUCT_SUMMARY_PROVIDER=fake
 - **Frontend**
   - `cd web && npm run test` – Vitest + Testing Library (hooks, components, storage, API client).
   - `cd web && npm run test:e2e` – Playwright E2E (requires `npx playwright install chromium` once).
+
+## Deploying to Render
+
+The repo now ships with a Render blueprint (`render.yaml`) plus production Dockerfile (`server/Dockerfile`) so you can host the API + UI without touching the local Docker flow (`docker-compose.yml` keeps using `Dockerfile.dev`).
+
+1. **Create the Postgres database**
+   - Render will provision the `rag-chatbot-outlets` database defined in `render.yaml`.
+   - The backend service automatically injects its connection string into `OUTLETS_POSTGRES_URL` and sets `OUTLETS_DB_BACKEND=postgres`.
+
+2. **Backend web service (FastAPI)**
+   - Type: `web`, environment: `docker`, `rootDir: server`, `dockerfilePath: Dockerfile`.
+   - Health check path: `/health` (already specified in `render.yaml`).
+   - Required environment variables:
+     - `OPENAI_API_KEY`, `TEXT2SQL_PROVIDER=openai` (or `fake/local` if preferred).
+     - `PRODUCT_VECTOR_STORE_BACKEND=pinecone` plus `PINECONE_API_KEY`, `PINECONE_INDEX_NAME`, `PINECONE_REGION`, `PINECONE_CLOUD`.
+     - `ENABLE_SSE=true` if you want planner telemetry.
+     - `RENDER_FRONTEND_ORIGIN=https://<your-frontend>.onrender.com` so CORS automatically whitelists the hosted UI.
+   - Optional: Langfuse keys, calculator HTTP mode, etc., via the same env mechanism.
+
+3. **Frontend static site (Vite)**
+   - Type: `static`, `rootDir: web`, `buildCommand: npm install && npm run build`, `publishPath: dist`.
+   - Set `VITE_API_BASE_URL=https://<your-backend>.onrender.com` so the SPA targets the hosted API.
+   - Leave `VITE_ENABLE_SSE=true` to stream planner events.
+
+4. **Local overrides remain untouched**
+   - `docker-compose.yml`, `server/Dockerfile.dev`, and `web/Dockerfile.dev` continue powering the localhost workflow (FAISS + SQLite).
+   - The new environment knobs (`RENDER_FRONTEND_ORIGIN`, Pinecone/Postgres settings) are opt-in and only need to be set on Render or when mimicking that setup locally.
+
+You can deploy directly via Render's Blueprint flow (`render.yaml`) or recreate the same configuration manually in the dashboard using the values above.
 

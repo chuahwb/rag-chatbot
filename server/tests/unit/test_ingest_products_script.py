@@ -1,5 +1,6 @@
 import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,116 @@ def test_ingest_products_creates_faiss_index(tmp_path, monkeypatch):
     assert "Sample Bottle" in doc.page_content
     assert doc.metadata["variantId"] == "sample-bottle-default"
     assert doc.metadata["price"] == 42.0
+
+
+def test_ingest_products_uses_pinecone_when_configured(tmp_path, monkeypatch):
+    source = tmp_path / "seed.json"
+    write_seed(
+        source,
+        [
+            {
+                "slug": "sample",
+                "title": "Sample Bottle",
+                "description": "Keeps drinks hot.",
+                "tags": ["bottle"],
+                "variants": [
+                    {
+                        "id": "sample-bottle-default",
+                        "title": "Default",
+                        "price": 42.0,
+                        "available": True,
+                    }
+                ],
+            }
+        ],
+    )
+
+    settings = AppSettings(
+        product_vector_store_backend="pinecone",
+        pinecone_api_key="test",
+        pinecone_index_name="zus-products",
+        pinecone_cloud="aws",
+        pinecone_region="us-east-1",
+    )
+    monkeypatch.setattr(script, "get_settings", lambda: settings)
+    monkeypatch.setattr(script, "get_embeddings", lambda provider: object())
+
+    records = script.load_products_from_file(source)
+
+    saved: dict[str, object] = {}
+
+    class DummyListResponse:
+        def __init__(self, names=None):
+            self._names = names or []
+
+        def names(self):
+            return list(self._names)
+
+    class DummyIndex:
+        pass
+
+    class DummyPineconeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+            self.names: list[str] = []
+            self.created: list[dict[str, object]] = []
+            self.index = DummyIndex()
+
+        def list_indexes(self):
+            return DummyListResponse(self.names)
+
+        def create_index(self, name, dimension, metric, spec):
+            self.created.append(
+                {
+                    "name": name,
+                    "dimension": dimension,
+                    "metric": metric,
+                    "spec": spec,
+                }
+            )
+            self.names.append(name)
+
+        def Index(self, name):
+            saved["index_name"] = name
+            return self.index
+
+    class DummyServerlessSpec:
+        def __init__(self, cloud, region):
+            saved["spec"] = {"cloud": cloud, "region": region}
+
+    clients: list[DummyPineconeClient] = []
+
+    def fake_pinecone(api_key):
+        client = DummyPineconeClient(api_key)
+        clients.append(client)
+        saved["client"] = client
+        return client
+
+    fake_pinecone_module = types.SimpleNamespace(Pinecone=fake_pinecone, ServerlessSpec=DummyServerlessSpec)
+    monkeypatch.setitem(sys.modules, "pinecone", fake_pinecone_module)
+
+    class DummyVectorStore:
+        def __init__(self, index, embedding):
+            saved["index"] = index
+            saved["embedding"] = embedding
+
+        def add_documents(self, documents):
+            saved["documents"] = list(documents)
+
+    fake_langchain_pinecone = types.SimpleNamespace(PineconeVectorStore=DummyVectorStore)
+    monkeypatch.setitem(sys.modules, "langchain_pinecone", fake_langchain_pinecone)
+
+    result = script.ingest_products(records=records, dest=tmp_path / "ignored", provider="openai")
+
+    assert result == Path(settings.pinecone_index_name)
+    assert saved["index_name"] == settings.pinecone_index_name
+    assert saved["documents"][0].metadata["variantId"] == "sample-bottle-default"
+
+    client = clients[0]
+    assert client.api_key == settings.pinecone_api_key
+    assert client.created[0]["name"] == settings.pinecone_index_name
+    assert client.created[0]["dimension"] == 1536
+    assert saved["spec"] == {"cloud": settings.pinecone_cloud, "region": settings.pinecone_region}
 
 
 def test_load_products_from_file_invalid(tmp_path):

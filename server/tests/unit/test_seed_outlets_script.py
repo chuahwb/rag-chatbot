@@ -37,6 +37,20 @@ class DummyResponse:
         return self._json
 
 
+def override_settings(monkeypatch, **overrides):
+    defaults = {
+        "outlets_db_backend": "sqlite",
+        "outlets_sqlite_url": script.DEFAULT_SQLITE_DB_URL,
+        "outlets_postgres_url": None,
+    }
+    defaults.update(overrides)
+
+    def _stub():
+        return SimpleNamespace(**defaults)
+
+    monkeypatch.setattr(script, "AppSettings", _stub)
+
+
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=FIELDNAMES)
@@ -293,4 +307,52 @@ def test_load_outlets_from_endpoint_html_uses_wp_api(monkeypatch) -> None:
     assert records[0].postal_code == "43000"
     assert records[0].open_time is None
     assert records[0].external_id == "zus-coffee-test-area"
+
+
+def test_default_db_url_prefers_postgres_when_backend_requests_it(monkeypatch) -> None:
+    override_settings(
+        monkeypatch,
+        outlets_db_backend="postgres",
+        outlets_postgres_url="postgresql+psycopg://supabase",
+        outlets_sqlite_url="sqlite:///should-not-use.db",
+    )
+    assert script._default_db_url() == "postgresql+psycopg://supabase"
+
+
+def test_default_db_url_raises_when_postgres_missing(monkeypatch) -> None:
+    override_settings(
+        monkeypatch,
+        outlets_db_backend="postgres",
+        outlets_postgres_url=None,
+        outlets_sqlite_url="sqlite:///preferred.db",
+    )
+    with pytest.raises(ValueError):
+        script._default_db_url()
+
+
+def test_default_db_url_uses_legacy_sqlite_env(monkeypatch) -> None:
+    override_settings(
+        monkeypatch,
+        outlets_db_backend="sqlite",
+        outlets_sqlite_url="sqlite:///legacy.db",
+    )
+
+    assert script._default_db_url() == "sqlite:///legacy.db"
+
+
+def test_default_db_url_falls_back_to_constant(monkeypatch, tmp_path: Path) -> None:
+    temp_db = tmp_path / "custom.db"
+    monkeypatch.setattr(
+        script,
+        "DEFAULT_SQLITE_DB_URL",
+        f"sqlite:///{temp_db}",
+    )
+    override_settings(
+        monkeypatch,
+        outlets_db_backend="sqlite",
+        outlets_sqlite_url="",
+        outlets_postgres_url=None,
+    )
+
+    assert script._default_db_url() == f"sqlite:///{temp_db}"
 

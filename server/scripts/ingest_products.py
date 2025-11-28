@@ -11,12 +11,12 @@ import httpx
 from bs4 import BeautifulSoup
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
-from langchain_community.embeddings.fake import FakeEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings
 from pydantic import BaseModel, Field, HttpUrl, ValidationError, model_validator
 
-from app.core.config import get_settings
+from app.core.config import AppSettings, get_settings
+from app.services.pinecone_utils import extract_index_names
+from app.services.products import build_product_embeddings
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("ingest_products")
 
@@ -24,6 +24,13 @@ DEFAULT_COLLECTION_URLS = [
     "https://shop.zuscoffee.com/collections/all-tumbler",
     "https://shop.zuscoffee.com/collections/mugs",
 ]
+
+EMBEDDING_DIMENSIONS: dict[str, int] = {
+    # Keep this aligned with build_product_embeddings in app.services.products.
+    "openai": 1536,
+    "fake": 1536,
+    "local": 1536,
+}
 
 
 class VariantRecord(BaseModel):
@@ -250,39 +257,39 @@ def build_documents(records: Iterable[ProductRecord]) -> List[Document]:
             chunks = splitter.split_text(full_text) or [full_text]
 
             for chunk_index, chunk in enumerate(chunks):
+                metadata = {
+                    "productTitle": record.title,
+                    "productSlug": record.slug,
+                    "productUrl": str(record.url) if record.url else None,
+                    "productType": record.product_type,
+                    "tags": record.tags,
+                    "variantId": variant.id,
+                    "variantTitle": variant.title,
+                    "available": variant.available,
+                    "price": variant.price,
+                    "compareAtPrice": variant.compare_at_price,
+                    "sku": variant.sku,
+                    "imageUrl": variant.image_url,
+                    "chunkIndex": chunk_index,
+                }
+                metadata = {k: v for k, v in metadata.items() if v is not None}
+
                 documents.append(
                     Document(
                         page_content=chunk,
-                        metadata={
-                            "productTitle": record.title,
-                            "productSlug": record.slug,
-                            "productUrl": str(record.url) if record.url else None,
-                            "productType": record.product_type,
-                            "tags": record.tags,
-                            "variantId": variant.id,
-                            "variantTitle": variant.title,
-                            "available": variant.available,
-                            "price": variant.price,
-                            "compareAtPrice": variant.compare_at_price,
-                            "sku": variant.sku,
-                            "imageUrl": variant.image_url,
-                            "chunkIndex": chunk_index,
-                        },
+                        metadata=metadata,
                     )
                 )
     return documents
 
 
 def get_embeddings(provider: str):
-    provider = provider.lower()
-    if provider == "openai":
-        settings = get_settings()
-        if not settings.openai_api_key:
-            raise ValueError("OPENAI_API_KEY is not set. Please configure it in your environment or .env file.")
-        return OpenAIEmbeddings(model="text-embedding-3-small", api_key=settings.openai_api_key)
-    if provider in {"fake", "local"}:
-        return FakeEmbeddings(size=1536)
-    raise ValueError(f"Unsupported embeddings provider: {provider}")
+    settings = get_settings()
+    normalized = (provider or (settings.embeddings_provider or "openai")).lower()
+    try:
+        return build_product_embeddings(settings, provider_override=normalized)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def ingest_products(*, records: Iterable[ProductRecord], dest: Path, provider: str) -> Path:
@@ -290,27 +297,97 @@ def ingest_products(*, records: Iterable[ProductRecord], dest: Path, provider: s
     if not documents:
         raise ValueError("No documents were produced from the provided records.")
 
-    embeddings = get_embeddings(provider)
-    logger.info("Creating FAISS index with %d documents", len(documents))
-    vector_store = FAISS.from_documents(documents, embeddings)
+    settings = get_settings()
+    backend = (settings.product_vector_store_backend or "faiss").lower()
+    provider_name = (provider or (settings.embeddings_provider or "openai")).lower()
+    embeddings = get_embeddings(provider_name)
 
-    dest.mkdir(parents=True, exist_ok=True)
-    vector_store.save_local(str(dest))
-    logger.info("Saved FAISS index to %s", dest)
-    return dest
+    if backend == "faiss":
+        logger.info("Creating FAISS index with %d documents", len(documents))
+        vector_store = FAISS.from_documents(documents, embeddings)
+        dest.mkdir(parents=True, exist_ok=True)
+        vector_store.save_local(str(dest))
+        logger.info("Saved FAISS index to %s", dest)
+        return dest
+
+    if backend == "pinecone":
+        return _ingest_into_pinecone(
+            documents=documents,
+            embeddings=embeddings,
+            settings=settings,
+            provider=provider_name,
+        )
+
+    raise ValueError(f"Unsupported product vector store backend: {backend}")
+
+
+def _ingest_into_pinecone(
+    *,
+    documents: List[Document],
+    embeddings,
+    settings: AppSettings,
+    provider: str,
+) -> Path:
+    from langchain_pinecone import PineconeVectorStore
+
+    dimension = _embedding_dimension(provider)
+    index_name, client = _ensure_pinecone_index(settings, dimension=dimension)
+    index = client.Index(index_name)
+    vector_store = PineconeVectorStore(index=index, embedding=embeddings)
+    vector_store.add_documents(documents)
+    logger.info("Upserted %d documents into Pinecone index %s", len(documents), index_name)
+    return Path(index_name)
+
+
+def _ensure_pinecone_index(settings: AppSettings, *, dimension: int) -> tuple[str, "Pinecone"]:
+    from pinecone import Pinecone, ServerlessSpec
+
+    api_key = (settings.pinecone_api_key or "").strip()
+    if not api_key:
+        raise ValueError("PINECONE_API_KEY is required when PRODUCT_VECTOR_STORE_BACKEND=pinecone.")
+    index_name = (settings.pinecone_index_name or "").strip()
+    if not index_name:
+        raise ValueError("PINECONE_INDEX_NAME is required when PRODUCT_VECTOR_STORE_BACKEND=pinecone.")
+
+    client = Pinecone(api_key=api_key)
+    names = extract_index_names(client.list_indexes())
+    if index_name not in names:
+        logger.info(
+            "Creating Pinecone index %s (cloud=%s, region=%s)",
+            index_name,
+            settings.pinecone_cloud,
+            settings.pinecone_region,
+        )
+        client.create_index(
+            name=index_name,
+            dimension=dimension,
+            metric="cosine",
+            spec=ServerlessSpec(cloud=settings.pinecone_cloud, region=settings.pinecone_region),
+        )
+    else:
+        logger.info("Using existing Pinecone index %s", index_name)
+
+    return index_name, client
+
+
+def _embedding_dimension(provider: str) -> int:
+    dimension = EMBEDDING_DIMENSIONS.get(provider.lower())
+    if dimension is None:
+        raise ValueError(f"Unsupported embeddings provider for Pinecone index sizing: {provider}")
+    return dimension
 
 
 def parse_args() -> argparse.Namespace:
     settings = get_settings()
     default_dest = Path(settings.vector_store_path)
 
-    parser = argparse.ArgumentParser(description="Ingest ZUS drinkware products into a FAISS vector store.")
+    parser = argparse.ArgumentParser(description="Ingest ZUS drinkware products into a FAISS or Pinecone vector store.")
     parser.add_argument("--source", type=Path, help="Path to seed JSON file instead of fetching live data.")
     parser.add_argument(
         "--dest",
         type=Path,
         default=default_dest,
-        help=f"Destination directory for FAISS index (default: {default_dest}).",
+        help=f"Destination directory for FAISS index (default: {default_dest}). Ignored when using Pinecone.",
     )
     parser.add_argument("--provider", type=str, default="openai", help="Embeddings provider: openai|local|fake.")
     parser.add_argument("--fetch-url", type=str, default=None, help="Optional HTTPS endpoint returning product JSON list.")

@@ -1,8 +1,11 @@
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.core.config import AppSettings
+from app.db import session as session_module
 from app.db.base import Base
 from app.db.models import Outlet
 from app.services.outlets import (
@@ -239,6 +242,65 @@ def test_default_sql_generator_local_provider(monkeypatch, session: Session) -> 
     assert prompt is not None
     assert set(prompt.input_variables) == {"input", "table_info", "top_k"}
 
+
+def test_text2sql_service_works_with_postgres_backend(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_create_engine(url: str, **kwargs):
+        captured["url"] = url
+        engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+        captured["engine"] = engine
+        return engine
+
+    monkeypatch.setattr(session_module, "create_engine", fake_create_engine)
+    monkeypatch.setattr(
+        session_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            outlets_db_backend="postgres",
+            outlets_postgres_url="postgresql+psycopg://postgres:pass@localhost:5432/postgres",
+            outlets_sqlite_url="sqlite:///unused.db",
+        ),
+    )
+    session_module._engine = None
+    session_module._SessionLocal = None
+
+    monkeypatch.setattr(
+        "app.services.outlets.get_settings",
+        lambda: AppSettings(text2sql_provider="fake"),
+    )
+
+    session_factory = session_module.get_session_factory()
+    engine = captured["engine"]
+    Base.metadata.create_all(engine)
+
+    with session_factory() as session:
+        session.add(
+            Outlet(
+                external_id="zus-coffee-ss-2",
+                name="ZUS Coffee SS 2",
+                city="Petaling Jaya",
+                state="Selangor",
+                postal_code="47300",
+                address="No. 1, Jalan SS2/55, 47300 Petaling Jaya, Selangor",
+                open_time="09:00",
+                close_time="21:00",
+                services=["wifi", "delivery"],
+            )
+        )
+        session.commit()
+
+        service = OutletsText2SQLService(
+            session=session,
+            sql_generator=lambda _: (
+                "SELECT name, open_time FROM outlets WHERE external_id = 'zus-coffee-ss-2'",
+                {},
+            ),
+        )
+        response = service.query("opening time for SS 2")
+
+    assert captured["url"] == "postgresql+psycopg://postgres:pass@localhost:5432/postgres"
+    assert response.rows == [{"name": "ZUS Coffee SS 2", "open_time": "09:00"}]
 
 def test_build_sql_prompt_includes_required_fields() -> None:
     prompt = _build_sql_prompt()

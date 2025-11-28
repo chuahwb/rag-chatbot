@@ -9,6 +9,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import Any, Iterable, List
 from urllib.parse import urljoin, urlparse
@@ -21,6 +22,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.config import AppSettings
 from app.db.base import Base
 from app.db.models import Outlet
 
@@ -29,6 +31,7 @@ logger = logging.getLogger("seed_outlets")
 
 DEFAULT_ENDPOINT = "https://zuscoffee.com/category/store/kuala-lumpur-selangor/"
 DEFAULT_ENDPOINTS = [DEFAULT_ENDPOINT]
+DEFAULT_SQLITE_DB_URL = "sqlite:///./data/sqlite/outlets.db"
 
 CSV_FIELDNAMES = [
     "name",
@@ -409,6 +412,20 @@ def _normalise_outlet_payload(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _default_db_url() -> str:
+    settings = AppSettings()
+    backend = (settings.outlets_db_backend or "sqlite").strip().lower()
+    postgres_url = (settings.outlets_postgres_url or "").strip()
+    sqlite_url = (settings.outlets_sqlite_url or DEFAULT_SQLITE_DB_URL).strip()
+    if backend == "postgres":
+        if postgres_url:
+            return postgres_url
+        raise ValueError(
+            "OUTLETS_POSTGRES_URL must be set when OUTLETS_DB_BACKEND=postgres."
+        )
+    return sqlite_url
+
+
 def load_outlets_from_csv(path: Path) -> List[OutletRecord]:
     if not path.exists():
         raise FileNotFoundError(f"CSV file not found at {path}")
@@ -649,7 +666,7 @@ def _gather_records(args: argparse.Namespace) -> List[OutletRecord]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Seed the outlets SQLite database from a CSV file.")
+    parser = argparse.ArgumentParser(description="Seed the outlets database (SQLite or Postgres) from CSV/endpoint data.")
     parser.add_argument(
         "--csv",
         type=Path,
@@ -675,8 +692,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--db",
         type=str,
-        default="sqlite:///./data/sqlite/outlets.db",
-        help="SQLAlchemy database URL for outlets.",
+        default=_default_db_url(),
+        help="SQLAlchemy database URL for outlets (SQLite or Postgres).",
     )
     return parser.parse_args()
 

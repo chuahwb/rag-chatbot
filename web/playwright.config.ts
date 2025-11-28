@@ -7,7 +7,10 @@ const HOST = process.env.E2E_HOST ?? '127.0.0.1'
 export default defineConfig({
   testDir: './tests/e2e',
   fullyParallel: true,
-  reporter: [['list'], ['html', { open: 'never' }]],
+  reporter: [
+    ['list'],
+    ['html', { open: 'never', outputFolder: 'test-results/playwright-report' }]
+  ],
   use: {
     baseURL: process.env.E2E_BASE_URL ?? `http://${HOST}:${PORT}`,
     headless: true,

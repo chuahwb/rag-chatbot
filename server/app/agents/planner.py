@@ -417,16 +417,35 @@ class ChatPlanner:
 
         if tools.lastTool:
             parts.append(f"Last tool: {tools.lastTool}")
-        if tools.lastResult:
+        if tools.lastResult is not None:
+            safe_payload = ChatPlanner._redact_tool_result(tools.lastTool, tools.lastResult)
             parts.append(
                 "Tool result:\n"
-                + json.dumps(tools.lastResult, indent=2, ensure_ascii=False)
+                + json.dumps(safe_payload, indent=2, ensure_ascii=False)
             )
         if error:
             parts.append(f"Error: {error.type} - {error.message}")
         if not parts:
             parts.append("No tool call yet; planner still needs information.")
         return "\n".join(parts)
+
+    @staticmethod
+    def _redact_tool_result(last_tool: str | None, result: Any) -> Any:
+        """
+        Strip internal-only details from tool payloads before they are sent to the LLM.
+
+        This prevents leaking implementation details such as raw SQL queries or parameter
+        bindings while preserving the user-relevant rows and fields.
+        """
+        if not isinstance(result, dict):
+            return result
+
+        if last_tool == "outlets":
+            # Outlets responses may contain internal SQL strings and parameter maps which
+            # should not be exposed to the model. Keep only user-facing fields.
+            return {key: value for key, value in result.items() if key not in {"sql", "params"}}
+
+        return result
 
     @staticmethod
     def _rule_based_message(chat_state: ChatState) -> str:

@@ -17,12 +17,14 @@ class StubPlannerLlm:
     def __init__(self) -> None:
         self.responses: dict[type, list[dict[str, object]]] = {}
         self.calls: list[str] = []
+        self.last_prompt_by_id: dict[str, str] = {}
 
     def queue_response(self, schema: type, payload: dict[str, object]) -> None:
         self.responses.setdefault(schema, []).append(payload)
 
     def invoke_structured(self, schema, *, prompt, variables, prompt_id):
         self.calls.append(prompt_id)
+        self.last_prompt_by_id[prompt_id] = prompt
         queue = self.responses.get(schema)
         if queue:
             payload = queue.pop(0)
@@ -543,3 +545,47 @@ def test_planner_surfaces_outlet_execution_error():
     assert response.actions[-1].status == ToolStatus.error
     assert response.memory["error"]["type"] == "outlet_exec_error"
     assert "issue" in response.response.content.lower()
+
+
+def test_tool_summary_redacts_outlet_sql_from_llm_prompt():
+    session_id = "session-outlets-redact-sql"
+    event_broker._channels.pop(session_id, None)
+
+    llm = StubPlannerLlm()
+    llm.queue_response(IntentResult, {"intent": "outlets"})
+    llm.queue_response(SlotResult, {"outletArea": "SS2"})
+    llm.queue_response(DecisionResult, {"decision": "call_outlets"})
+    llm.queue_response(
+        SynthesisResult,
+        {"message": "ZUS Coffee SS 2 is open from 09:00 to 21:00."},
+    )
+
+    class StubOutletsServiceWithSql(StubOutletsService):
+        def query(self, user_query: str) -> OutletsQueryResponse:  # type: ignore[override]
+            self.queries.append(user_query)
+            return OutletsQueryResponse(
+                query=user_query,
+                sql="SELECT * FROM outlets; -- internal",
+                params={"secret": "value"},
+                rows=[
+                    {"name": "ZUS Coffee SS 2", "open_time": "09:00", "close_time": "21:00"},
+                ],
+            )
+
+        async def query_async(self, user_query: str) -> OutletsQueryResponse:  # type: ignore[override]
+            return self.query(user_query)
+
+    outlets_service = StubOutletsServiceWithSql()
+    planner, _, _, _, _ = make_planner(outlets_service=outlets_service, llm=llm)
+    request = make_request(session_id, "What are the hours for SS2 outlet?")
+
+    response = planner.run(request)
+
+    # Ensure the tool was called as normal.
+    assert outlets_service.queries == ["What are the hours for SS2 outlet?"]
+    assert "open" in response.response.content.lower()
+
+    # The synthesis prompt should not expose raw SQL or params back to the LLM.
+    synthesis_prompt = llm.last_prompt_by_id.get("planner.synthesis.v1", "")
+    assert "select * from outlets" not in synthesis_prompt.lower()
+    assert "secret" not in synthesis_prompt.lower()
